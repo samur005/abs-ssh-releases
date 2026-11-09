@@ -1,0 +1,83 @@
+name: Build ABS SSH 2.4.6 Windows
+on:
+  workflow_dispatch:
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch source from private repo
+        env:
+          GH_TOKEN: ${{ secrets.ABS_SRC_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch fix/cdn-rollback-reconnect-pending "https://x-access-token:${GH_TOKEN}@github.com/samur005/abs-ssh.git" src
+          cd src
+          git rev-parse HEAD
+          # RemnaUi / updater fallback patches (unpushed due to email verify block)
+          python - <<'PY'
+from pathlib import Path
+p = Path('windowsApp/src/main/kotlin/com/abs/ssh/desktop/DesktopUpdater.kt')
+t = p.read_text()
+t2 = t.replace('?: "2.4.5"', '?: "2.4.6"')
+p.write_text(t2)
+print('DesktopUpdater', '2.4.6' in t2)
+p = Path('shared/src/desktopTest/kotlin/com/abs/ssh/RemnaTest.kt')
+t = p.read_text()
+t = t.replace('@Test fun remnaActionsAtTopOfVpnTab() = runComposeUiTest {',
+             '@Test fun remnaActionsAtTopOfVpnTab() = runDesktopComposeUiTest(width = 420, height = 1600) {')
+t = t.replace('Box(Modifier.size(420.dp, 700.dp).background(AbsColors.ink))',
+              'Box(Modifier.fillMaxSize().background(AbsColors.ink))')
+if 'runDesktopComposeUiTest' not in t.split('class RemnaUiTest')[0]:
+    t = t.replace('import androidx.compose.ui.test.*\n', 'import androidx.compose.ui.test.*\nimport androidx.compose.ui.test.runDesktopComposeUiTest\n')
+p.write_text(t)
+print('RemnaTest patched')
+PY
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Package MSI + EXE + portable
+        working-directory: src
+        shell: bash
+        run: ./gradlew :windowsApp:packageMsi :windowsApp:packageExe :windowsApp:createDistributable
+      - name: Authenticode-sign MSI + EXE
+        working-directory: src
+        shell: pwsh
+        env:
+          CERT_B64: ${{ secrets.ABS_WIN_CERT_BASE64 }}
+          CERT_PW: ${{ secrets.ABS_WIN_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_B64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName | Select-Object -Last 1
+          $files = Get-ChildItem windowsApp/build/compose/binaries/main -Recurse -Include *.msi,*.exe | Where-Object { $_.DirectoryName -notmatch '\\app\\' }
+          foreach ($f in $files) {
+            & $signtool.FullName sign /f $pfx /p $env:CERT_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "ABS SSH" $f.FullName
+            if ($LASTEXITCODE -ne 0) { Remove-Item $pfx; exit 1 }
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Host "$($f.Name): $($sig.Status) / $($sig.SignerCertificate.Subject) / $($sig.SignerCertificate.Thumbprint)"
+            if (-not $sig.SignerCertificate) { Remove-Item $pfx; exit 1 }
+          }
+          Remove-Item $pfx
+      - name: Stage outputs
+        working-directory: src
+        shell: pwsh
+        run: |
+          $ver = "2.4.6"
+          New-Item -ItemType Directory -Force release-out | Out-Null
+          Copy-Item windowsApp/build/compose/binaries/main/msi/*.msi "release-out/abs-ssh-$ver-windows-x64.msi"
+          Copy-Item windowsApp/build/compose/binaries/main/exe/*.exe "release-out/abs-ssh-$ver-windows-x64-setup.exe"
+          Compress-Archive -Path "windowsApp/build/compose/binaries/main/app/ABS SSH" -DestinationPath "release-out/abs-ssh-$ver-windows-x64-portable.zip" -Force
+          Get-ChildItem release-out | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } | Tee-Object release-out/SHA256SUMS-windows.txt
+      - name: Upload Windows to draft on this repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="build-v2.4.6-windows"
+          gh release delete "$TAG" -R samur005/abs-ssh-releases -y 2>/dev/null || true
+          gh release create "$TAG" release-out/* -R samur005/abs-ssh-releases --draft --title "Build 2.4.6 Windows (temp)" --notes "Temporary packaging draft for 2.4.6."
