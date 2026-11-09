@@ -1,6 +1,9 @@
 name: Build ABS SSH 2.4.6 Windows
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-246.yml'
 jobs:
   windows:
     runs-on: windows-latest
@@ -14,29 +17,14 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 --branch fix/cdn-rollback-reconnect-pending "https://x-access-token:${GH_TOKEN}@github.com/samur005/abs-ssh.git" src
-          cd src
-          git rev-parse HEAD
-          # RemnaUi / updater fallback patches (unpushed due to email verify block)
-          python - <<'PY'
-from pathlib import Path
-p = Path('windowsApp/src/main/kotlin/com/abs/ssh/desktop/DesktopUpdater.kt')
-t = p.read_text()
-t2 = t.replace('?: "2.4.5"', '?: "2.4.6"')
-p.write_text(t2)
-print('DesktopUpdater', '2.4.6' in t2)
-p = Path('shared/src/desktopTest/kotlin/com/abs/ssh/RemnaTest.kt')
-t = p.read_text()
-t = t.replace('@Test fun remnaActionsAtTopOfVpnTab() = runComposeUiTest {',
-             '@Test fun remnaActionsAtTopOfVpnTab() = runDesktopComposeUiTest(width = 420, height = 1600) {')
-t = t.replace('Box(Modifier.size(420.dp, 700.dp).background(AbsColors.ink))',
-              'Box(Modifier.fillMaxSize().background(AbsColors.ink))')
-if 'runDesktopComposeUiTest' not in t.split('class RemnaUiTest')[0]:
-    t = t.replace('import androidx.compose.ui.test.*\n', 'import androidx.compose.ui.test.*\nimport androidx.compose.ui.test.runDesktopComposeUiTest\n')
-p.write_text(t)
-print('RemnaTest patched')
-PY
+          cd src && git rev-parse HEAD
+          # updater fallback 2.4.6
+          sed -i 's/?: "2.4.5"/?: "2.4.6"/' windowsApp/src/main/kotlin/com/abs/ssh/desktop/DesktopUpdater.kt || \
+            sed -i 's/?: \"2.4.5\"/?: \"2.4.6\"/' windowsApp/src/main/kotlin/com/abs/ssh/desktop/DesktopUpdater.kt
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "17" }
+        with:
+          distribution: temurin
+          java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
       - name: Package MSI + EXE + portable
         working-directory: src
